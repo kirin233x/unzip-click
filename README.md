@@ -9,6 +9,8 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 - 顶层是多个文件（或单个文件）：自动建一个与压缩包同名的文件夹（`aaaa.zip` → `aaaa/`），内容放进去。
 - 重名时自动加 ` 2`、` 3`，不覆盖已有文件；解压失败不留半成品。
 - 自动跳过 `__MACOSX`、`.DS_Store`。
+- 加密 zip：弹窗输入密码，输错可重试，取消则放弃。
+- 中文 zip 乱码：读取 zip 中央目录，文件名不是 UTF-8 时自动按 GB18030 / Big5 / Shift-JIS / EUC-KR 解码，无需手动选择。
 - 可同时选中多个压缩包，各自独立解压。
 - 解压引擎是系统自带的 `/usr/bin/bsdtar`（libarchive），无需安装其他依赖。
 
@@ -28,4 +30,5 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 
 - 使用 ad-hoc 签名，不需要开发者账号，不会过期。发给同事时压缩 `build/UnzipClick.app` 后，让对方运行 `install.sh`（或 `xattr -cr` 去掉隔离标记）。
 - zstd 需要较新的系统自带 bsdtar（macOS 13+）；更老的系统可 `brew install zstd`。
-- 暂未支持：加密压缩包的密码输入、中文 zip 文件名的 GBK 乱码修复。
+- 密码功能只对 zip 有效：libarchive 读不了加密的 7z / rar，遇到会直接报错。
+- 文件名编码自动识别只针对 zip；tar 里的非 UTF-8 文件名暂不处理。
