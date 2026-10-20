@@ -157,10 +157,10 @@ func extractOnce(_ archive: URL, password: String?, charset: String?) throws -> 
     try runBsdtar(archive: archive, into: tmp, password: password, charset: charset)
 
     // 防 tarbomb：
-    //  - 顶层只有一个文件夹：直接放到压缩包旁边，沿用它自己的名字（不会出现 aaaa/aaaa/ 套娃）
-    //  - 顶层是多个文件，或单个文件：新建与压缩包同名的文件夹，把内容放进去
-    let items = try fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: [.isDirectoryKey])
-    if items.count == 1, (try? items[0].resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+    //  - 顶层只有一个条目（文件或文件夹）：直接放到压缩包旁边，沿用它自己的名字
+    //  - 顶层有多个条目：新建与压缩包同名的文件夹，把内容放进去
+    let items = try fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)
+    if items.count == 1 {
         let destination = uniqueURL(parent.appendingPathComponent(items[0].lastPathComponent))
         try fm.moveItem(at: items[0], to: destination)
         return destination
