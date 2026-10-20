@@ -26,6 +26,15 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 右键快速操作：安装后在 Finder 右键 → 快速操作 → 「UnzipClick 解压」。
 若没出现，到 系统设置 → 隐私与安全性 → 扩展 → Finder 里勾选。
 
+## 分发给同事
+
+```bash
+./package.sh      # 生成 dist/UnzipClick.zip
+```
+
+把 zip 发给同事，对方按里面的「先看我.txt」操作即可（不需要装 Xcode）。
+也可以把它传到 GitHub 仓库的 Releases 里，发链接给大家。
+
 ## 说明
 
 - 图标由 `python3 tools/make_icon.py` 生成（需要 Pillow），想换图标可改这个脚本，或直接替换 `Resources/AppIcon.icns`。

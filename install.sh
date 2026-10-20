@@ -3,11 +3,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[ -d build/UnzipClick.app ] || ./build.sh
+# 分发包里 App 就在脚本旁边；源码仓库里则先编译
+if [ -d UnzipClick.app ]; then
+  SRC=UnzipClick.app
+else
+  [ -d build/UnzipClick.app ] || ./build.sh
+  SRC=build/UnzipClick.app
+fi
 
 mkdir -p ~/Applications
 rm -rf ~/Applications/UnzipClick.app
-cp -R build/UnzipClick.app ~/Applications/
+cp -R "$SRC" ~/Applications/
 # 同事拿到的 zip 带有隔离标记，去掉它就不会被 Gatekeeper 拦
 xattr -cr ~/Applications/UnzipClick.app
 
