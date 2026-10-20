@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 APP=build/UnzipClick.app
 rm -rf build
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # 同时编译 Apple 芯片和 Intel，合成通用二进制
 for arch in arm64 x86_64; do
@@ -15,6 +15,7 @@ lipo -create build/UnzipClick-arm64 build/UnzipClick-x86_64 -output "$APP/Conten
 rm build/UnzipClick-arm64 build/UnzipClick-x86_64
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # ad-hoc 签名：不需要开发者账号，也不会过期
 codesign --force --sign - "$APP"
