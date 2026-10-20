@@ -30,6 +30,6 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 
 - 图标由 `python3 tools/make_icon.py` 生成（需要 Pillow），想换图标可改这个脚本，或直接替换 `Resources/AppIcon.icns`。
 - 使用 ad-hoc 签名，不需要开发者账号，不会过期。发给同事时压缩 `build/UnzipClick.app` 后，让对方运行 `install.sh`（或 `xattr -cr` 去掉隔离标记）。
-- zstd 需要较新的系统自带 bsdtar（macOS 13+）；更老的系统可 `brew install zstd`。
+- zstd：App 内置了一个小的解压器（`Sources/zstd-shim.c` + `ThirdParty/zstd`，BSD 协议），老版本 macOS 的 bsdtar 没有 zstd 也能解，无需 `brew install zstd`。
 - 密码功能只对 zip 有效：libarchive 读不了加密的 7z / rar，遇到会直接报错。
 - 文件名编码自动识别只针对 zip；tar 里的非 UTF-8 文件名暂不处理。

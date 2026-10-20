@@ -129,6 +129,10 @@ func runBsdtar(archive: URL, into dir: URL, password: String?, charset: String?)
     // 从图形界面启动时没有 locale，bsdtar 写中文文件名会失败
     var env = ProcessInfo.processInfo.environment
     env["LC_ALL"] = "en_US.UTF-8"
+    // 把 App 内置的 zstd 解压器放进 PATH（老系统的 bsdtar 解 zstd 要调外部 zstd 程序）
+    if let bin = Bundle.main.resourceURL?.appendingPathComponent("bin").path {
+        env["PATH"] = bin + ":" + (env["PATH"] ?? "/usr/bin:/bin")
+    }
     process.environment = env
     let stderr = Pipe()
     process.standardError = stderr
