@@ -11,6 +11,7 @@ struct ExtractError: Error {
 enum Failure: Error {
     case password(wrong: Bool)
     case message(String)
+    case cancelled
 }
 
 let bsdtar = URL(fileURLWithPath: "/usr/bin/bsdtar")
@@ -118,7 +119,153 @@ func detectZipCharset(_ url: URL) -> String? {
 
 // MARK: - 解压
 
-func runBsdtar(archive: URL, into dir: URL, password: String?, charset: String?) throws {
+// MARK: - 进度
+
+/// 一次压缩包的解压任务：持有 bsdtar 进程（用于取消）和进度回调。
+final class Job {
+    private let lock = NSLock()
+    private var _process: Process?
+    private var _cancelled = false
+    /// 参数：已读压缩包字节数、压缩包总字节数（任意线程调用）
+    var report: (UInt64, UInt64) -> Void = { _, _ in }
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _cancelled
+    }
+
+    func attach(_ process: Process) {
+        lock.lock(); defer { lock.unlock() }
+        _process = process
+    }
+
+    func cancel() {
+        lock.lock()
+        _cancelled = true
+        let process = _process
+        lock.unlock()
+        process?.terminate()
+    }
+}
+
+/// 读取 bsdtar 进程里「压缩包那个文件描述符」当前的读取位置，用它当进度。
+/// 通过 libproc 找到 inode 和大小都与压缩包一致的 vnode fd，取 fi_offset。拿不到时返回 nil。
+func archiveReadOffset(pid: pid_t, size: UInt64, inode: UInt64) -> UInt64? {
+    let listSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+    guard listSize > 0 else { return nil }
+    let capacity = Int(listSize) / MemoryLayout<proc_fdinfo>.stride + 8
+    var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+    let got = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(capacity * MemoryLayout<proc_fdinfo>.stride))
+    guard got > 0 else { return nil }
+    let count = Int(got) / MemoryLayout<proc_fdinfo>.stride
+
+    for fd in fds.prefix(count) where fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
+        var info = vnode_fdinfo()
+        let want = Int32(MemoryLayout<vnode_fdinfo>.size)
+        let r = proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEINFO, &info, want)
+        if r == want,
+           UInt64(info.pvi.vi_stat.vst_size) == size,
+           UInt64(info.pvi.vi_stat.vst_ino) == inode {
+            return UInt64(max(0, info.pfi.fi_offset))
+        }
+    }
+    return nil
+}
+
+/// 解压进度窗口：任务超过 0.8 秒才弹出，避免小文件一闪而过。
+final class ProgressWindow {
+    var onCancel: () -> Void = {}
+
+    private let window: NSWindow
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
+    private let bar = NSProgressIndicator()
+    private var token = 0
+    private var startedAt = Date()
+
+    init() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 130),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "UnzipClick"
+        window.isReleasedWhenClosed = false
+
+        titleLabel.font = .boldSystemFont(ofSize: 13)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.textColor = .secondaryLabelColor
+        bar.style = .bar
+        bar.minValue = 0
+        bar.maxValue = 1
+        bar.isIndeterminate = true
+
+        let cancel = NSButton(title: "取消", target: nil, action: nil)
+        cancel.target = self
+        cancel.action = #selector(cancelTapped)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let buttonRow = NSStackView(views: [spacer, cancel])
+        buttonRow.orientation = .horizontal
+        buttonRow.distribution = .fill
+
+        let stack = NSStackView(views: [titleLabel, bar, detailLabel, buttonRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
+        for view in [titleLabel, bar, detailLabel, buttonRow] {
+            view.widthAnchor.constraint(equalToConstant: 388).isActive = true
+        }
+        window.contentView = stack
+        window.setContentSize(stack.fittingSize)
+    }
+
+    @objc private func cancelTapped() {
+        detailLabel.stringValue = "正在取消…"
+        onCancel()
+    }
+
+    func begin(name: String, index: Int, total: Int) {
+        token += 1
+        let mine = token
+        startedAt = Date()
+        titleLabel.stringValue = total > 1 ? "正在解压（\(index)/\(total)）：\(name)" : "正在解压：\(name)"
+        detailLabel.stringValue = "准备中…"
+        bar.isIndeterminate = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [self] in
+            guard token == mine else { return }
+            window.center()
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            if bar.isIndeterminate { bar.startAnimation(nil) }
+        }
+    }
+
+    func update(read: UInt64, total: UInt64) {
+        guard total > 0 else { return }
+        let fraction = min(1, Double(read) / Double(total))
+        if bar.isIndeterminate {
+            bar.stopAnimation(nil)
+            bar.isIndeterminate = false
+        }
+        bar.doubleValue = fraction
+        let fmt = { (n: UInt64) in ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file) }
+        var text = "\(fmt(read)) / \(fmt(total))（\(Int(fraction * 100))%）"
+        let elapsed = Date().timeIntervalSince(startedAt)
+        if elapsed > 3, fraction > 0.02, fraction < 1 {
+            let remaining = Int(elapsed * (1 - fraction) / fraction)
+            text += remaining < 60 ? " · 剩余约 \(remaining) 秒" : " · 剩余约 \((remaining + 59) / 60) 分钟"
+        }
+        detailLabel.stringValue = text
+    }
+
+    func end() {
+        token += 1
+        window.orderOut(nil)
+    }
+}
+
+func runBsdtar(archive: URL, into dir: URL, password: String?, charset: String?, job: Job) throws {
+    if job.isCancelled { throw Failure.cancelled }
     var args = ["-xf", archive.path, "-C", dir.path, "--exclude", "__MACOSX", "--exclude", ".DS_Store"]
     if let charset { args += ["--options", "hdrcharset=\(charset)"] }
     if let password { args += ["--passphrase", password] }
@@ -138,8 +285,26 @@ func runBsdtar(archive: URL, into dir: URL, password: String?, charset: String?)
     process.standardError = stderr
     process.standardOutput = FileHandle.nullDevice
     try process.run()
+    job.attach(process)
+    if job.isCancelled { process.terminate() }
+
+    // 定时读取 bsdtar 读压缩包的位置作为进度；zip / 7z 一开始会先跳到末尾读目录，所以前 0.5 秒不上报
+    let attrs = try? FileManager.default.attributesOfItem(atPath: archive.path)
+    let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+    let inode = (attrs?[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+    timer.schedule(deadline: .now() + 0.5, repeating: 0.25)
+    timer.setEventHandler {
+        if let offset = archiveReadOffset(pid: process.processIdentifier, size: size, inode: inode) {
+            job.report(offset, size)
+        }
+    }
+    timer.resume()
+
     let output = stderr.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
+    timer.cancel()
+    if job.isCancelled { throw Failure.cancelled }
     guard process.terminationStatus != 0 else { return }
 
     let text = String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -150,7 +315,7 @@ func runBsdtar(archive: URL, into dir: URL, password: String?, charset: String?)
 }
 
 /// 解压一次。先解到压缩包旁边的隐藏临时目录（同一磁盘，移动是瞬间完成的），成功后再改名，失败不留半成品。
-func extractOnce(_ archive: URL, password: String?, charset: String?) throws -> URL {
+func extractOnce(_ archive: URL, password: String?, charset: String?, job: Job) throws -> URL {
     let fm = FileManager.default
     let parent = archive.deletingLastPathComponent()
     let name = folderName(for: archive.lastPathComponent)
@@ -158,7 +323,7 @@ func extractOnce(_ archive: URL, password: String?, charset: String?) throws -> 
     try fm.createDirectory(at: tmp, withIntermediateDirectories: false)
     defer { try? fm.removeItem(at: tmp) }
 
-    try runBsdtar(archive: archive, into: tmp, password: password, charset: charset)
+    try runBsdtar(archive: archive, into: tmp, password: password, charset: charset, job: job)
 
     // 防 tarbomb：
     //  - 顶层只有一个条目（文件或文件夹）：直接放到压缩包旁边，沿用它自己的名字
@@ -196,18 +361,20 @@ func askPassword(for name: String, wrong: Bool) -> String? {
 }
 
 /// 解压一个压缩包，必要时自动选文件名编码、询问密码。返回最终生成的文件夹。
-func extract(_ archive: URL) throws -> URL {
+func extract(_ archive: URL, job: Job) throws -> URL {
     let isZip = archive.pathExtension.lowercased() == "zip"
     var charset = isZip ? detectZipCharset(archive) : nil
     var password: String?
     while true {
         do {
-            return try extractOnce(archive, password: password, charset: charset)
+            return try extractOnce(archive, password: password, charset: charset, job: job)
         } catch Failure.password(let wrong) {
             guard let entered = askPassword(for: archive.lastPathComponent, wrong: wrong) else {
                 throw ExtractError(archive: archive.lastPathComponent, message: "已取消（需要密码）")
             }
             password = entered
+        } catch Failure.cancelled {
+            throw ExtractError(archive: archive.lastPathComponent, message: "已取消")
         } catch Failure.message(let text) {
             if charset != nil {
                 charset = nil   // 指定编码失败时退回默认行为再试一次
@@ -236,6 +403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var received = false
     private var running = 0
     private var lastBatch: (urls: Set<URL>, time: Date)?
+    private let progressUI = ProgressWindow()
+    private var currentJob: Job?   // 仅主线程访问
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 直接接管「打开文档」Apple Event。Finder 走这条路径时，AppKit 默认处理有时会因为
@@ -245,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             andSelector: #selector(handleOpenDocuments(_:withReplyEvent:)),
             forEventClass: AEEventClass(kCoreEventClass),
             andEventID: AEEventID(kAEOpenDocuments))
+        progressUI.onCancel = { [weak self] in self?.currentJob?.cancel() }
         uzLog("willFinishLaunching")
     }
 
@@ -294,14 +464,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         worker.async { [self] in
             var done: [URL] = []
             var errors: [String] = []
-            for url in urls {
+            for (index, url) in urls.enumerated() {
+                let job = Job()
+                job.report = { [weak self] read, total in
+                    DispatchQueue.main.async { self?.progressUI.update(read: read, total: total) }
+                }
+                DispatchQueue.main.async { [self] in
+                    currentJob = job
+                    progressUI.begin(name: url.lastPathComponent, index: index + 1, total: urls.count)
+                }
                 do {
-                    done.append(try extract(url))
+                    done.append(try extract(url, job: job))
                 } catch let error as ExtractError {
-                    errors.append("\(error.archive)：\(error.message)")
+                    if !job.isCancelled { errors.append("\(error.archive)：\(error.message)") }
                 } catch {
                     errors.append("\(url.lastPathComponent)：\(error.localizedDescription)")
                 }
+                DispatchQueue.main.async { [self] in
+                    progressUI.end()
+                }
+                if job.isCancelled { break }   // 取消后跳过剩下的压缩包
             }
             DispatchQueue.main.async { [self] in
                 finish(done: done, errors: errors)

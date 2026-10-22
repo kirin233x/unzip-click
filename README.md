@@ -12,6 +12,7 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 - 加密 zip：弹窗输入密码，输错可重试，取消则放弃。
 - 中文 zip 乱码：读取 zip 中央目录，文件名不是 UTF-8 时自动按 GB18030 / Big5 / Shift-JIS / EUC-KR 解码，无需手动选择。
 - 可同时选中多个压缩包，各自独立解压。
+- 解压超过 1 秒会弹出进度窗口：百分比、已读/总大小、预计剩余时间，可随时取消（取消不留半成品）。
 - 解压引擎是系统自带的 `/usr/bin/bsdtar`（libarchive），无需安装其他依赖。
 
 ## 安装（在 Mac 上，需先 `xcode-select --install`）
