@@ -35,6 +35,12 @@ zip、tar.*（gz / bz2 / xz / zst）、7z、rar、xz、zst。
 把 zip 发给同事，对方按里面的「先看我.txt」操作即可（不需要装 Xcode）。
 也可以把它传到 GitHub 仓库的 Releases 里，发链接给大家。
 
+## 排查
+
+运行日志在 `~/Library/Logs/UnzipClick.log`：每次启动、收到的文件路径都会记一行。
+如果 Finder 里双击没反应，看这个日志里有没有 `odoc event`；同时可以用
+`mdfind "kMDItemCFBundleIdentifier == 'com.local.UnzipClick'"` 检查是否有多份 UnzipClick.app（解压出来的分发包、`build/` 目录等）被系统当成同一个 App。
+
 ## 说明
 
 - 图标由 `python3 tools/make_icon.py` 生成（需要 Pillow），想换图标可改这个脚本，或直接替换 `Resources/AppIcon.icns`。

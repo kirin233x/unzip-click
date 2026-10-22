@@ -11,6 +11,7 @@ else
   SRC=build/UnzipClick.app
 fi
 
+pkill -x UnzipClick 2>/dev/null || true
 mkdir -p ~/Applications
 rm -rf ~/Applications/UnzipClick.app
 cp -R "$SRC" ~/Applications/

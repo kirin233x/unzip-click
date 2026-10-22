@@ -218,12 +218,53 @@ func extract(_ archive: URL) throws -> URL {
     }
 }
 
+/// 追加写入 ~/Library/Logs/UnzipClick.log，方便排查「Finder 打开却没反应」这类问题
+func uzLog(_ message: String) {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/UnzipClick.log")
+    let line = "\(ISO8601DateFormatter().string(from: Date())) [\(getpid())] \(message)\n"
+    if let handle = try? FileHandle(forWritingTo: url) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        try? Data(line.utf8).write(to: url)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let worker = DispatchQueue(label: "unzipclick.extract")
     private var received = false
     private var running = 0
+    private var lastBatch: (urls: Set<URL>, time: Date)?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // 直接接管「打开文档」Apple Event。Finder 走这条路径时，AppKit 默认处理有时会因为
+        // 「没有窗口」而判定打开失败并直接退出，根本不会调用 application(_:open:)。
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocuments(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEOpenDocuments))
+        uzLog("willFinishLaunching")
+    }
+
+    @objc func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        var urls: [URL] = []
+        if let direct = event.paramDescriptor(forKeyword: keyDirectObject) {
+            if direct.numberOfItems > 0 {
+                for i in 1...direct.numberOfItems {
+                    if let url = direct.atIndex(i)?.fileURLValue { urls.append(url) }
+                }
+            } else if let url = direct.fileURLValue {
+                urls.append(url)
+            }
+        }
+        uzLog("odoc event: \(urls.map(\.path))")
+        handle(urls)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        uzLog("didFinishLaunching")
         // 直接打开 App（没带文件）时给个提示，然后退出
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
             guard !received else { return }
@@ -237,6 +278,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        uzLog("open urls: \(urls.map(\.path))")
+        handle(urls)
+    }
+
+    private func handle(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        // 两条路径万一都触发了，2 秒内相同的一批文件只处理一次
+        let batch = Set(urls)
+        if let last = lastBatch, last.urls == batch, Date().timeIntervalSince(last.time) < 2 { return }
+        lastBatch = (batch, Date())
+
         received = true
         running += 1
         worker.async { [self] in
